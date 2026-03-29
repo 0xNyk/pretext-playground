@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Pretext Playground — ASCII Dragon</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+    <style>
+      *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; }
+      body {
+        background: #0a0a0a;
+        cursor: crosshair;
+        font-family: Inter, system-ui, sans-serif;
+      }
+      canvas { position: fixed; inset: 0; width: 100%; height: 100%; }
+
+      /* ── Hint ── */
+      #hint {
+        position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+        color: rgba(255,255,255,0.2); font-size: 12px;
+        pointer-events: none; transition: opacity 0.8s; letter-spacing: 0.04em;
+      }
+
+      /* ── Panel toggle ── */
+      #panel-toggle {
+        position: fixed; top: 16px; right: 16px; z-index: 100;
+        width: 36px; height: 36px; border-radius: 8px;
+        background: rgba(20,20,20,0.85); border: 1px solid #333;
+        color: #888; font-size: 16px; cursor: pointer;
+        display: flex; align-items: center; justify-content: center;
+        backdrop-filter: blur(8px); transition: all 0.2s;
+      }
+      #panel-toggle:hover { background: rgba(30,30,30,0.95); color: #ccc; border-color: #555; }
+
+      /* ── Control panel ── */
+      #panel {
+        position: fixed; top: 16px; right: 16px; z-index: 99;
+        width: 300px; max-height: calc(100dvh - 32px);
+        background: rgba(14,14,14,0.92); border: 1px solid #262626;
+        border-radius: 12px; backdrop-filter: blur(12px);
+        overflow-y: auto; overscroll-behavior: contain;
+        transform: translateX(320px); transition: transform 0.25s ease;
+        cursor: default;
+      }
+      #panel.open { transform: translateX(0); }
+
+      #panel::-webkit-scrollbar { width: 4px; }
+      #panel::-webkit-scrollbar-track { background: transparent; }
+      #panel::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+
+      .panel-header {
+        padding: 16px 16px 12px; border-bottom: 1px solid #222;
+        display: flex; align-items: center; justify-content: space-between;
+      }
+      .panel-header h2 { font-size: 13px; font-weight: 600; color: #ccc; letter-spacing: 0.02em; }
+      .panel-header button {
+        background: none; border: none; color: #666; font-size: 18px; cursor: pointer;
+        width: 28px; height: 28px; display: flex; align-items: center; justify-content: center;
+        border-radius: 6px;
+      }
+      .panel-header button:hover { color: #aaa; background: rgba(255,255,255,0.05); }
+
+      .section { padding: 12px 16px; border-bottom: 1px solid #1a1a1a; }
+      .section:last-child { border-bottom: none; }
+      .section-title {
+        font-size: 10px; font-weight: 600; color: #666;
+        text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 10px;
+      }
+
+      .control-row {
+        display: flex; align-items: center; justify-content: space-between;
+        margin-bottom: 8px; gap: 8px;
+      }
+      .control-row:last-child { margin-bottom: 0; }
+      .control-label { font-size: 12px; color: #999; white-space: nowrap; min-width: 80px; }
+      .control-value {
+        font-size: 11px; color: #666; font-family: "SF Mono", "Fira Code", monospace;
+        min-width: 36px; text-align: right;
+      }
+      input[type="range"] {
+        flex: 1; height: 4px; -webkit-appearance: none; appearance: none;
+        background: #333; border-radius: 2px; outline: none;
+      }
+      input[type="range"]::-webkit-slider-thumb {
+        -webkit-appearance: none; width: 14px; height: 14px;
+        border-radius: 50%; background: #888; cursor: pointer;
+        border: 2px solid #0a0a0a;
+      }
+      input[type="range"]::-webkit-slider-thumb:hover { background: #aaa; }
+
+      .toggle-row {
+        display: flex; align-items: center; justify-content: space-between;
+        margin-bottom: 8px;
+      }
+      .toggle-row:last-child { margin-bottom: 0; }
+      .toggle {
+        position: relative; width: 36px; height: 20px; cursor: pointer;
+      }
+      .toggle input { opacity: 0; width: 0; height: 0; }
+      .toggle-track {
+        position: absolute; inset: 0; background: #333; border-radius: 10px;
+        transition: background 0.2s;
+      }
+      .toggle-thumb {
+        position: absolute; top: 2px; left: 2px; width: 16px; height: 16px;
+        background: #888; border-radius: 50%; transition: all 0.2s;
+      }
+      .toggle input:checked ~ .toggle-track { background: #ff6600; }
+      .toggle input:checked ~ .toggle-thumb { left: 18px; background: #fff; }
+
+      .preset-btn {
+        padding: 5px 10px; font-size: 11px; border-radius: 6px;
+        border: 1px solid #333; background: rgba(255,255,255,0.03);
+        color: #999; cursor: pointer; transition: all 0.15s;
+        font-family: inherit;
+      }
+      .preset-btn:hover { background: rgba(255,255,255,0.08); color: #ccc; border-color: #555; }
+      .preset-btn.active { background: rgba(255,102,0,0.15); border-color: #ff6600; color: #ff8844; }
+
+      .presets { display: flex; gap: 6px; flex-wrap: wrap; }
+
+      /* ── Stats bar ── */
+      #stats {
+        position: fixed; bottom: 16px; right: 16px; z-index: 50;
+        font: 10px "SF Mono", "Fira Code", monospace;
+        color: #444; pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="c"></canvas>
+    <div id="hint">click &amp; hold for fire &mdash; drag through text &mdash; press <kbd style="background:#222;padding:1px 5px;border-radius:3px;border:1px solid #333">P</kbd> for panel</div>
+
+    <button id="panel-toggle" title="Settings (P)">&#9881;</button>
+
+    <div id="panel">
+      <div class="panel-header">
+        <h2>Playground Controls</h2>
+        <button id="panel-close" title="Close">&times;</button>
+      </div>
+
+      <div class="section">
+        <div class="section-title">Presets</div>
+        <div class="presets" id="presets"></div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">Dragon</div>
+        <div class="control-row">
+          <span class="control-label">Segments</span>
+          <input type="range" data-key="dragonSegments" min="10" max="80" step="1" />
+          <span class="control-value" data-val="dragonSegments"></span>
+        </div>
+        <div class="control-row">
+          <span class="control-label">Speed</span>
+          <input type="range" data-key="dragonSpeed" min="0.02" max="0.4" step="0.01" />
+          <span class="control-value" data-val="dragonSpeed"></span>
+        </div>
+        <div class="control-row">
+          <span class="control-label">Size</span>
+          <input type="range" data-key="dragonScale" min="0.3" max="3" step="0.1" />
+          <span class="control-value" data-val="dragonScale"></span>
+        </div>
+        <div class="toggle-row">
+          <span class="control-label">Wings</span>
+          <label class="toggle"><input type="checkbox" data-key="showWings" /><span class="toggle-track"></span><span class="toggle-thumb"></span></label>
+        </div>
+        <div class="toggle-row">
+          <span class="control-label">Spines</span>
+          <label class="toggle"><input type="checkbox" data-key="showSpines" /><span class="toggle-track"></span><span class="toggle-thumb"></span></label>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">Physics</div>
+        <div class="control-row">
+          <span class="control-label">Push force</span>
+          <input type="range" data-key="pushForce" min="1" max="30" step="0.5" />
+          <span class="control-value" data-val="pushForce"></span>
+        </div>
+        <div class="control-row">
+          <span class="control-label">Spring</span>
+          <input type="range" data-key="springStrength" min="0.002" max="0.08" step="0.001" />
+          <span class="control-value" data-val="springStrength"></span>
+        </div>
+        <div class="control-row">
+          <span class="control-label">Damping</span>
+          <input type="range" data-key="damping" min="0.8" max="0.99" step="0.005" />
+          <span class="control-value" data-val="damping"></span>
+        </div>
+        <div class="control-row">
+          <span class="control-label">Gravity</span>
+          <input type="range" data-key="burnGravity" min="0" max="3" step="0.1" />
+          <span class="control-value" data-val="burnGravity"></span>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">Fire</div>
+        <div class="control-row">
+          <span class="control-label">Blast radius</span>
+          <input type="range" data-key="fireRadius" min="30" max="250" step="5" />
+          <span class="control-value" data-val="fireRadius"></span>
+        </div>
+        <div class="control-row">
+          <span class="control-label">Blast force</span>
+          <input type="range" data-key="fireForce" min="5" max="50" step="1" />
+          <span class="control-value" data-val="fireForce"></span>
+        </div>
+        <div class="toggle-row">
+          <span class="control-label">Screen shake</span>
+          <label class="toggle"><input type="checkbox" data-key="screenShake" /><span class="toggle-track"></span><span class="toggle-thumb"></span></label>
+        </div>
+        <div class="toggle-row">
+          <span class="control-label">Embers</span>
+          <label class="toggle"><input type="checkbox" data-key="showEmbers" /><span class="toggle-track"></span><span class="toggle-thumb"></span></label>
+        </div>
+        <div class="toggle-row">
+          <span class="control-label">Particles</span>
+          <label class="toggle"><input type="checkbox" data-key="showParticles" /><span class="toggle-track"></span><span class="toggle-thumb"></span></label>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">Enemies</div>
+        <div class="toggle-row">
+          <span class="control-label">Enabled</span>
+          <label class="toggle"><input type="checkbox" data-key="showEnemies" /><span class="toggle-track"></span><span class="toggle-thumb"></span></label>
+        </div>
+        <div class="control-row">
+          <span class="control-label">Count</span>
+          <input type="range" data-key="enemyCount" min="1" max="20" step="1" />
+          <span class="control-value" data-val="enemyCount"></span>
+        </div>
+        <div class="control-row">
+          <span class="control-label">Speed</span>
+          <input type="range" data-key="enemySpeed" min="0.1" max="2" step="0.1" />
+          <span class="control-value" data-val="enemySpeed"></span>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">Atmosphere</div>
+        <div class="toggle-row">
+          <span class="control-label">Runes</span>
+          <label class="toggle"><input type="checkbox" data-key="showRunes" /><span class="toggle-track"></span><span class="toggle-thumb"></span></label>
+        </div>
+        <div class="toggle-row">
+          <span class="control-label">Custom cursor</span>
+          <label class="toggle"><input type="checkbox" data-key="showCursor" /><span class="toggle-track"></span><span class="toggle-thumb"></span></label>
+        </div>
+        <div class="control-row">
+          <span class="control-label">Text opacity</span>
+          <input type="range" data-key="textOpacity" min="0" max="1.5" step="0.05" />
+          <span class="control-value" data-val="textOpacity"></span>
+        </div>
+      </div>
+    </div>
+
+    <div id="stats"></div>
+
+    <script type="module" src="/src/dragon.ts"></script>
+  </body>
+</html>

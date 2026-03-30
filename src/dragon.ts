@@ -3,58 +3,36 @@ import { prepareWithSegments, layoutWithLines } from '@chenglou/pretext'
 // ─── Config (mutated by UI panel) ───────────────────────────
 
 export const cfg = {
-  // Dragon
   dragonSegments: 60,
   dragonSpeed: 0.18,
   dragonScale: 1.0,
   showWings: true,
   showSpines: true,
-  // Physics
   pushForce: 6,
   springStrength: 0.015,
   damping: 0.93,
   burnGravity: 0.8,
-  // Fire
   fireRadius: 120,
   fireForce: 25,
   screenShake: true,
   showEmbers: true,
   showParticles: true,
-  // Atmosphere
   showRunes: true,
   showCursor: true,
   textOpacity: 1.0,
-  // Enemies
   showEnemies: true,
   enemyCount: 8,
   enemySpeed: 0.6,
 }
 
-// Presets
 const PRESETS: Record<string, Partial<typeof cfg>> = {
   Default: {},
-  Gentle: {
-    dragonSpeed: 0.10, pushForce: 5, fireForce: 10, fireRadius: 60,
-    screenShake: false, burnGravity: 0.2, springStrength: 0.03,
-  },
-  Chaos: {
-    pushForce: 25, fireForce: 50, fireRadius: 200, burnGravity: 2.5,
-    springStrength: 0.005, damping: 0.96, screenShake: true,
-  },
-  Zen: {
-    showParticles: false, showEmbers: false, screenShake: false,
-    showRunes: false, pushForce: 4, fireForce: 8,
-    springStrength: 0.04, burnGravity: 0,
-  },
-  Tiny: {
-    dragonSegments: 20, dragonScale: 0.6, fireRadius: 50, pushForce: 6,
-  },
-  Leviathan: {
-    dragonSegments: 80, dragonScale: 2.0, dragonSpeed: 0.08,
-    pushForce: 20, fireRadius: 180,
-  },
+  Gentle: { dragonSpeed: 0.10, pushForce: 5, fireForce: 10, fireRadius: 60, screenShake: false, burnGravity: 0.2, springStrength: 0.03 },
+  Chaos: { pushForce: 25, fireForce: 50, fireRadius: 200, burnGravity: 2.5, springStrength: 0.005, damping: 0.96, screenShake: true },
+  Zen: { showParticles: false, showEmbers: false, screenShake: false, showRunes: false, pushForce: 4, fireForce: 8, springStrength: 0.04, burnGravity: 0 },
+  Tiny: { dragonSegments: 20, dragonScale: 0.6, fireRadius: 50, pushForce: 6 },
+  Leviathan: { dragonSegments: 80, dragonScale: 2.0, dragonSpeed: 0.08, pushForce: 20, fireRadius: 180 },
 }
-
 const DEFAULT_CFG = { ...cfg }
 
 function applyPreset(name: string) {
@@ -63,19 +41,21 @@ function applyPreset(name: string) {
   syncUI()
 }
 
-// ─── Canvas ─────────────────────────────────────────────────
+// ─── Canvas (cap DPR to limit memory) ───────────────────────
 
 const canvas = document.getElementById('c') as HTMLCanvasElement
 const ctx = canvas.getContext('2d')!
-const dpr = window.devicePixelRatio || 1
-let W = innerWidth, H = innerHeight
+// Cap DPR at 2 to avoid 4x+ memory on high-res displays
+const dpr = Math.min(window.devicePixelRatio || 1, 2)
+const NAV_H = 44
+let W = innerWidth, H = innerHeight - NAV_H
 
 let initialized = false
 function resize() {
-  W = innerWidth; H = innerHeight
+  W = innerWidth; H = innerHeight - NAV_H
   canvas.width = W * dpr; canvas.height = H * dpr
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-  if (initialized) { layoutAllText(); buildTunnel(); buildFloatingCards() }
+  if (initialized) { layoutAllText(); buildTunnel() }
 }
 resize()
 addEventListener('resize', resize)
@@ -84,20 +64,15 @@ addEventListener('resize', resize)
 
 const mouse = { x: W / 2, y: H / 2 }
 addEventListener('mousemove', (e) => { mouse.x = e.clientX; mouse.y = e.clientY })
-addEventListener('touchmove', (e) => {
-  e.preventDefault()
-  mouse.x = e.touches[0].clientX; mouse.y = e.touches[0].clientY
-}, { passive: false })
+addEventListener('touchmove', (e) => { e.preventDefault(); mouse.x = e.touches[0].clientX; mouse.y = e.touches[0].clientY }, { passive: false })
 
 // ─── Screen shake ───────────────────────────────────────────
 
 let shakeIntensity = 0, shakeX = 0, shakeY = 0
-
 function triggerShake(intensity: number) {
   if (!cfg.screenShake) return
   shakeIntensity = Math.max(shakeIntensity, Math.min(intensity, 8))
 }
-
 function updateShake() {
   if (shakeIntensity > 0.1) {
     shakeX = (Math.random() - 0.5) * shakeIntensity
@@ -106,42 +81,73 @@ function updateShake() {
   } else { shakeX = 0; shakeY = 0; shakeIntensity = 0 }
 }
 
-// ─── Letters ────────────────────────────────────────────────
+// ─── Letters (SoA — struct-of-arrays for cache/memory efficiency) ─
 
-type Letter = {
-  char: string
-  homeX: number; homeY: number
-  x: number; y: number
-  vx: number; vy: number
-  angle: number; angularVel: number
-  font: string; fontSize: number
-  color: string; baseAlpha: number
-  burning: boolean; burnTimer: number
-  charWidth: number
-  scaleMultiplier: number
-  gravity: number
+// Instead of an array of objects, use parallel typed arrays.
+// This eliminates per-letter object overhead and GC pressure.
+const MAX_LETTERS = 2000
+let letterCount = 0
+
+// Per-letter data in typed arrays (no object allocation per letter)
+const lHomeX = new Float32Array(MAX_LETTERS)
+const lHomeY = new Float32Array(MAX_LETTERS)
+const lX = new Float32Array(MAX_LETTERS)
+const lY = new Float32Array(MAX_LETTERS)
+const lVx = new Float32Array(MAX_LETTERS)
+const lVy = new Float32Array(MAX_LETTERS)
+const lAngle = new Float32Array(MAX_LETTERS)
+const lAngVel = new Float32Array(MAX_LETTERS)
+const lCharW = new Float32Array(MAX_LETTERS)
+const lBaseAlpha = new Float32Array(MAX_LETTERS)
+const lFontSize = new Float32Array(MAX_LETTERS)
+const lBurnTimer = new Float32Array(MAX_LETTERS)
+const lScaleMul = new Float32Array(MAX_LETTERS)
+const lGravity = new Float32Array(MAX_LETTERS)
+
+// These can't be typed arrays (strings) — but we intern them to avoid duplication
+const lChar: string[] = []
+const lFont: string[] = []     // index into fontPool
+const lColor: string[] = []    // index into colorPool
+
+// ─── Embers + Particles — pooled with fixed max ────────────
+
+const MAX_EMBERS = 60
+let emberCount = 0
+const emX = new Float32Array(MAX_EMBERS)
+const emY = new Float32Array(MAX_EMBERS)
+const emVx = new Float32Array(MAX_EMBERS)
+const emVy = new Float32Array(MAX_EMBERS)
+const emLife = new Float32Array(MAX_EMBERS)
+const emSize = new Float32Array(MAX_EMBERS)
+const emChar: string[] = new Array(MAX_EMBERS)
+const emColor: string[] = new Array(MAX_EMBERS)
+const emberChars = ['·', '•', '∘', '˚']
+const emberColors = ['#ff6600', '#ffaa00', '#ff4400']
+
+function spawnEmber(x: number, y: number) {
+  if (!cfg.showEmbers || emberCount >= MAX_EMBERS) return
+  const i = emberCount++
+  const a = Math.random() * Math.PI * 2
+  emX[i] = x; emY[i] = y
+  emVx[i] = Math.cos(a) * (1 + Math.random() * 3)
+  emVy[i] = Math.sin(a) * (1 + Math.random() * 3) - 2
+  emLife[i] = 0.3 + Math.random() * 0.6
+  emSize[i] = 4 + Math.random() * 7
+  emChar[i] = emberChars[Math.random() * 4 | 0]
+  emColor[i] = emberColors[Math.random() * 3 | 0]
 }
 
-const letters: Letter[] = []
-
-// ─── Embers ─────────────────────────────────────────────────
-
-type Ember = { x: number; y: number; vx: number; vy: number; life: number; char: string; size: number; color: string }
-const embers: Ember[] = []
-
-function spawnEmbers(x: number, y: number, count: number) {
-  if (!cfg.showEmbers || embers.length > 60) return
-  for (let i = 0; i < Math.min(count, 3); i++) {
-    const a = Math.random() * Math.PI * 2
-    embers.push({
-      x, y, vx: Math.cos(a) * (1 + Math.random() * 3), vy: Math.sin(a) * (1 + Math.random() * 3) - 2,
-      life: 0.3 + Math.random() * 0.6,
-      char: ['·', '•', '∘', '˚'][Math.floor(Math.random() * 4)],
-      size: 4 + Math.random() * 7,
-      color: ['#ff6600', '#ffaa00', '#ff4400'][Math.floor(Math.random() * 3)],
-    })
-  }
-}
+const MAX_PARTICLES = 150
+let particleCount = 0
+const pX = new Float32Array(MAX_PARTICLES)
+const pY = new Float32Array(MAX_PARTICLES)
+const pVx = new Float32Array(MAX_PARTICLES)
+const pVy = new Float32Array(MAX_PARTICLES)
+const pLife = new Float32Array(MAX_PARTICLES)
+const pMaxLife = new Float32Array(MAX_PARTICLES)
+const pSize = new Float32Array(MAX_PARTICLES)
+const pChar: string[] = new Array(MAX_PARTICLES)
+const fireChars = '*✦✧⁕❋✺◌•∘˚⋆·'.split('')
 
 // ─── Text entries ───────────────────────────────────────────
 
@@ -166,7 +172,9 @@ const textEntries: TextEntry[] = [
 ]
 
 function layoutAllText() {
-  letters.length = 0
+  letterCount = 0
+  lChar.length = 0; lFont.length = 0; lColor.length = 0
+
   const mx = Math.max(50, W * 0.06), my = Math.max(60, H * 0.06)
   const cw = W - mx * 2
   const twoCol = cw > 700
@@ -175,16 +183,9 @@ function layoutAllText() {
   for (const entry of textEntries) {
     const fontStr = `${entry.fontSize}px ${entry.font}`
     let baseX: number, maxW: number
-    if (entry.column === 'right') {
-      baseX = twoCol ? col2X : mx
-      maxW = Math.min(entry.maxWidth, twoCol ? cw * 0.4 : cw)
-    } else if (entry.column === 'center') {
-      maxW = Math.min(entry.maxWidth, cw)
-      baseX = mx + (cw - maxW) / 2
-    } else {
-      baseX = mx
-      maxW = Math.min(entry.maxWidth, twoCol ? cw * 0.5 : cw)
-    }
+    if (entry.column === 'right') { baseX = twoCol ? col2X : mx; maxW = Math.min(entry.maxWidth, twoCol ? cw * 0.4 : cw) }
+    else if (entry.column === 'center') { maxW = Math.min(entry.maxWidth, cw); baseX = mx + (cw - maxW) / 2 }
+    else { baseX = mx; maxW = Math.min(entry.maxWidth, twoCol ? cw * 0.5 : cw) }
     const baseY = my + entry.yOffset
 
     try {
@@ -195,17 +196,16 @@ function layoutAllText() {
         const y = baseY + li * entry.lineHeight
         ctx.font = fontStr
         for (const char of lines[li].text) {
-          if (char === '\n') continue
+          if (char === '\n' || letterCount >= MAX_LETTERS) continue
           const cw2 = ctx.measureText(char).width
-          letters.push({
-            char, homeX: xc + cw2 / 2, homeY: y + entry.lineHeight / 2,
-            x: xc + cw2 / 2, y: y + entry.lineHeight / 2,
-            vx: 0, vy: 0, angle: 0, angularVel: 0,
-            font: fontStr, fontSize: entry.fontSize,
-            color: entry.color, baseAlpha: entry.alpha,
-            burning: false, burnTimer: 0, charWidth: cw2,
-            scaleMultiplier: 1, gravity: 0,
-          })
+          const i = letterCount++
+          lHomeX[i] = xc + cw2 / 2; lHomeY[i] = y + entry.lineHeight / 2
+          lX[i] = lHomeX[i]; lY[i] = lHomeY[i]
+          lVx[i] = 0; lVy[i] = 0; lAngle[i] = 0; lAngVel[i] = 0
+          lCharW[i] = cw2; lBaseAlpha[i] = entry.alpha
+          lFontSize[i] = entry.fontSize; lBurnTimer[i] = 0
+          lScaleMul[i] = 1; lGravity[i] = 0
+          lChar[i] = char; lFont[i] = fontStr; lColor[i] = entry.color
           xc += cw2
         }
       }
@@ -216,13 +216,20 @@ function layoutAllText() {
 // ─── Dragon chain ───────────────────────────────────────────
 
 const SEG_SPACING = 10
-let chain: { x: number; y: number; px: number; py: number }[] = []
+// SoA for chain too
+let chainN = 0
+let chX = new Float32Array(80), chY = new Float32Array(80)
+let chPx = new Float32Array(80), chPy = new Float32Array(80)
 
 function rebuildDragon() {
-  const n = cfg.dragonSegments
-  chain = []
-  for (let i = 0; i < n; i++) {
-    chain.push({ x: W / 2, y: H / 2 + i * SEG_SPACING, px: W / 2, py: H / 2 + i * SEG_SPACING })
+  chainN = cfg.dragonSegments
+  if (chX.length < chainN) {
+    chX = new Float32Array(chainN); chY = new Float32Array(chainN)
+    chPx = new Float32Array(chainN); chPy = new Float32Array(chainN)
+  }
+  for (let i = 0; i < chainN; i++) {
+    chX[i] = W / 2; chY[i] = H / 2 + i * SEG_SPACING
+    chPx[i] = chX[i]; chPy[i] = chY[i]
   }
 }
 rebuildDragon()
@@ -230,138 +237,144 @@ rebuildDragon()
 const dragonChars = '◆◆◇▼█▓▓▒╬╬╬╬╬╬╬╬╬╬╫╫╫╪╪╪╧╧╤╤╥╥║║││┃┃╎╎╏╏::····..'.split('')
 
 function segScale(i: number): number {
-  const n = chain.length
   if (i < 3) return (2.5 - i * 0.15) * cfg.dragonScale
-  const t = (i - 3) / (n - 3)
+  const t = (i - 3) / (chainN - 3)
   return (2.0 * (1 - t * t) + 0.2) * cfg.dragonScale
 }
 
-function segColor(i: number, time: number): string {
-  const t = i / chain.length
-  const p = Math.sin(time * 3 + i * 0.3) * 0.12
-  if (i < 3) return `rgb(255,${180 + p * 60 | 0},${40 + p * 30 | 0})`
-  const w = Math.sin(time * 2 - i * 0.15) * 0.15
-  return `rgba(${(255 * (1 - t * 0.5) + p * 20) | 0},${(140 * (1 - t * 0.8) + w * 60) | 0},${(30 * (1 - t) + w * 20) | 0},${1 - t * 0.45})`
-}
-
 function updateChain() {
-  const n = chain.length
-  for (let i = 0; i < n; i++) { chain[i].px = chain[i].x; chain[i].py = chain[i].y }
-  chain[0].x += (mouse.x - chain[0].x) * cfg.dragonSpeed
-  chain[0].y += (mouse.y - chain[0].y) * cfg.dragonSpeed
-  for (let i = 1; i < n; i++) {
-    const p = chain[i - 1], c = chain[i]
-    const dx = c.x - p.x, dy = c.y - p.y
+  for (let i = 0; i < chainN; i++) { chPx[i] = chX[i]; chPy[i] = chY[i] }
+  chX[0] += (mouse.x - chX[0]) * cfg.dragonSpeed
+  chY[0] += (mouse.y - chY[0]) * cfg.dragonSpeed
+  for (let i = 1; i < chainN; i++) {
+    const dx = chX[i] - chX[i - 1], dy = chY[i] - chY[i - 1]
     const d = Math.sqrt(dx * dx + dy * dy)
-    if (d > SEG_SPACING) { const r = SEG_SPACING / d; c.x = p.x + dx * r; c.y = p.y + dy * r }
+    if (d > SEG_SPACING) { const r = SEG_SPACING / d; chX[i] = chX[i - 1] + dx * r; chY[i] = chY[i - 1] + dy * r }
   }
 }
 
-// ─── Physics ────────────────────────────────────────────────
+// ─── Physics — operates on SoA arrays ───────────────────────
 
 function interactLetters(dt: number) {
-  const n = chain.length
-  for (const L of letters) {
+  const checkSegs = Math.min(Math.round(chainN * 0.4), chainN)
+  const damp = cfg.damping, spring = cfg.springStrength, push = cfg.pushForce, bGrav = cfg.burnGravity
+
+  for (let li = 0; li < letterCount; li++) {
+    let vx = lVx[li], vy = lVy[li], av = lAngVel[li]
+    const x = lX[li], y = lY[li], cw = lCharW[li]
+
     // Dragon body collision
-    const checkSegs = Math.min(Math.round(n * 0.4), n)
     for (let si = 0; si < checkSegs; si++) {
-      const seg = chain[si], sc = segScale(si)
+      const sc = segScale(si)
       const rad = 14 * sc * 0.45
-      const dx = L.x - seg.x, dy = L.y - seg.y
+      const dx = x - chX[si], dy = y - chY[si]
       const dSq = dx * dx + dy * dy
-      const minD = rad + L.charWidth * 0.4 + 4
+      const minD = rad + cw * 0.4 + 4
       if (dSq < minD * minD && dSq > 0.01) {
         const d = Math.sqrt(dSq)
-        const f = cfg.pushForce * ((minD - d) / minD) * sc
+        const f = push * ((minD - d) / minD) * sc
         const nx = dx / d, ny = dy / d
-        L.vx += nx * f + (seg.x - seg.px) * 0.4
-        L.vy += ny * f + (seg.y - seg.py) * 0.4
-        L.angularVel += (nx * 0.3 - ny * 0.2) * f * 0.12
+        vx += nx * f + (chX[si] - chPx[si]) * 0.4
+        vy += ny * f + (chY[si] - chPy[si]) * 0.4
+        av += (nx * 0.3 - ny * 0.2) * f * 0.12
       }
     }
 
-    // Wake turbulence (gentle)
-    for (let si = 5; si < n; si += 5) {
-      const seg = chain[si], dx = L.x - seg.x, dy = L.y - seg.y
+    // Wake (every 5th segment)
+    for (let si = 5; si < chainN; si += 5) {
+      const dx = x - chX[si], dy = y - chY[si]
       const dSq = dx * dx + dy * dy
       if (dSq < 1600 && dSq > 100) {
         const w = (1 - Math.sqrt(dSq) / 40) * 0.12
-        L.vx += (seg.x - seg.px) * w
-        L.vy += (seg.y - seg.py) * w
+        vx += (chX[si] - chPx[si]) * w
+        vy += (chY[si] - chPy[si]) * w
       }
     }
 
     // Burn
-    if (L.burning) {
-      L.burnTimer -= dt
-      L.scaleMultiplier = 1 + L.burnTimer * 0.4
-      L.gravity = cfg.burnGravity
-      if (Math.random() < dt * 2) spawnEmbers(L.x, L.y, 1)
-      if (L.burnTimer <= 0) { L.burning = false; L.burnTimer = 0; L.scaleMultiplier = 1; L.gravity = 0 }
+    if (lBurnTimer[li] > 0) {
+      lBurnTimer[li] -= dt
+      lScaleMul[li] = 1 + lBurnTimer[li] * 0.4
+      lGravity[li] = bGrav
+      if (Math.random() < dt * 2) spawnEmber(x, y)
+      if (lBurnTimer[li] <= 0) { lBurnTimer[li] = 0; lScaleMul[li] = 1; lGravity[li] = 0 }
     }
 
     // Spring home
-    const hdx = L.homeX - L.x, hdy = L.homeY - L.y
+    const hdx = lHomeX[li] - x, hdy = lHomeY[li] - y
     const hd = Math.sqrt(hdx * hdx + hdy * hdy)
     if (hd > 0.5) {
-      const sf = cfg.springStrength * (1 + hd * 0.001)
-      L.vx += hdx * sf; L.vy += hdy * sf
-      L.angularVel -= L.angle * 0.05
-    } else { L.angle *= 0.9 }
+      const sf = spring * (1 + hd * 0.001)
+      vx += hdx * sf; vy += hdy * sf
+      av -= lAngle[li] * 0.05
+    } else { lAngle[li] *= 0.9 }
 
-    L.vy += L.gravity
-    L.vx *= cfg.damping; L.vy *= cfg.damping
-    L.angularVel *= 0.91
-    L.x += L.vx; L.y += L.vy; L.angle += L.angularVel
+    vy += lGravity[li]
+    lVx[li] = vx * damp; lVy[li] = vy * damp
+    lAngVel[li] = av * 0.91
+    lX[li] = x + lVx[li]; lY[li] = y + lVy[li]
+    lAngle[li] += lAngVel[li]
   }
 }
 
-function fireBlastAt(x: number, y: number, dx: number, dy: number) {
+function fireBlastAt(bx: number, by: number, dx: number, dy: number) {
   let hits = 0
-  const rSq = cfg.fireRadius * cfg.fireRadius
-  for (const L of letters) {
-    const ldx = L.x - x, ldy = L.y - y, dSq = ldx * ldx + ldy * ldy
+  const rSq = cfg.fireRadius * cfg.fireRadius, ff = cfg.fireForce, fr = cfg.fireRadius
+  for (let li = 0; li < letterCount; li++) {
+    const ldx = lX[li] - bx, ldy = lY[li] - by
+    const dSq = ldx * ldx + ldy * ldy
     if (dSq < rSq && dSq > 0.01) {
-      const d = Math.sqrt(dSq), f = cfg.fireForce * ((1 - d / cfg.fireRadius) ** 2)
-      L.vx += (ldx / d * 0.4 + dx * 0.6) * f
-      L.vy += (ldy / d * 0.4 + dy * 0.6) * f - f * 0.2
-      L.angularVel += (Math.random() - 0.5) * f * 0.3
-      L.burning = true; L.burnTimer = Math.max(L.burnTimer, 0.5 + Math.random() * 1.2)
+      const d = Math.sqrt(dSq), f = ff * ((1 - d / fr) ** 2)
+      lVx[li] += (ldx / d * 0.4 + dx * 0.6) * f
+      lVy[li] += (ldy / d * 0.4 + dy * 0.6) * f - f * 0.2
+      lAngVel[li] += (Math.random() - 0.5) * f * 0.3
+      lBurnTimer[li] = Math.max(lBurnTimer[li], 0.5 + Math.random() * 1.2)
       hits++
     }
   }
-  if (hits > 3) { triggerShake(Math.min(hits * 0.4, 6)); spawnEmbers(x, y, Math.min(hits, 6)) }
+  if (hits > 3) { triggerShake(Math.min(hits * 0.4, 6)); for (let i = 0; i < Math.min(hits, 4); i++) spawnEmber(bx, by) }
 }
 
-// ─── Draw letters ───────────────────────────────────────────
+// ─── Draw letters — minimal ctx state changes ───────────────
 
 function drawLetters() {
   const opMul = cfg.textOpacity
-  for (const L of letters) {
-    let alpha = L.baseAlpha * opMul, color = L.color
-    if (L.burning) {
-      const h = Math.min(1, L.burnTimer)
+  let prevFont = ''
+
+  for (let i = 0; i < letterCount; i++) {
+    const burning = lBurnTimer[i] > 0
+    let alpha = lBaseAlpha[i] * opMul
+    let color = lColor[i]
+
+    if (burning) {
+      const h = Math.min(1, lBurnTimer[i])
       color = `rgb(255,${80 + h * 175 | 0},${h * 60 | 0})`
-      alpha = Math.min(1, L.baseAlpha * opMul + 0.5)
+      alpha = Math.min(1, alpha + 0.5)
     }
+
+    const font = lFont[i]
+    if (font !== prevFont) { ctx.font = font; prevFont = font }
+
     ctx.save()
-    ctx.translate(L.x, L.y); ctx.rotate(L.angle); ctx.scale(L.scaleMultiplier, L.scaleMultiplier)
-    ctx.globalAlpha = alpha; ctx.font = L.font; ctx.fillStyle = color
+    ctx.translate(lX[i], lY[i])
+    if (lAngle[i] !== 0) ctx.rotate(lAngle[i])
+    const sm = lScaleMul[i]
+    if (sm !== 1) ctx.scale(sm, sm)
+    ctx.globalAlpha = alpha
+    ctx.fillStyle = color
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
-    ctx.fillText(L.char, 0, 0)
-    if (L.burning && L.burnTimer > 0.3) {
-      ctx.globalAlpha = L.burnTimer * 0.2; ctx.fillStyle = '#ffaa00'
-      ctx.fillText(L.char, 0, 0)
+    ctx.fillText(lChar[i], 0, 0)
+    if (burning && lBurnTimer[i] > 0.3) {
+      ctx.globalAlpha = lBurnTimer[i] * 0.2
+      ctx.fillStyle = '#ffaa00'
+      ctx.fillText(lChar[i], 0, 0)
     }
     ctx.restore()
   }
 }
 
-// ─── Fire particles ─────────────────────────────────────────
+// ─── Fire emission + particle update ────────────────────────
 
-type Particle = { x: number; y: number; vx: number; vy: number; life: number; maxLife: number; char: string; size: number }
-const particles: Particle[] = []
-const fireChars = '*✦✧⁕❋✺◌•∘˚⋆·'.split('')
 let isBreathingFire = false, fireAccum = 0, totalFireTime = 0
 
 addEventListener('mousedown', (e) => { if (!(e.target as HTMLElement).closest('#panel, #panel-toggle')) isBreathingFire = true })
@@ -372,73 +385,91 @@ addEventListener('touchend', () => { isBreathingFire = false })
 function emitFire(dt: number) {
   if (!isBreathingFire) { totalFireTime = 0; return }
   fireAccum += dt; totalFireTime += dt
-  const head = chain[0], neck = chain[Math.min(3, chain.length - 1)]
-  const fdx = head.x - neck.x, fdy = head.y - neck.y
+  const hx = chX[0], hy = chY[0]
+  const ni = Math.min(3, chainN - 1)
+  const fdx = hx - chX[ni], fdy = hy - chY[ni]
   const len = Math.sqrt(fdx * fdx + fdy * fdy) || 1
   const dx = fdx / len, dy = fdy / len, angle = Math.atan2(fdy, fdx)
 
   if (cfg.showParticles) {
     while (fireAccum > 0.025) {
       fireAccum -= 0.025
-      if (particles.length > 150) break
-      for (let i = 0; i < 2; i++) {
-        const sp = (Math.random() - 0.5) * 1.0, spd = 5 + Math.random() * 7
-        particles.push({
-          x: head.x + dx * 15, y: head.y + dy * 15,
-          vx: Math.cos(angle + sp) * spd, vy: Math.sin(angle + sp) * spd - Math.random(),
-          life: 1, maxLife: 0.3 + Math.random() * 0.4,
-          char: fireChars[Math.random() * fireChars.length | 0], size: 6 + Math.random() * 12,
-        })
+      if (particleCount >= MAX_PARTICLES) break
+      for (let j = 0; j < 2; j++) {
+        if (particleCount >= MAX_PARTICLES) break
+        const i = particleCount++
+        const sp = (Math.random() - 0.5), spd = 5 + Math.random() * 7
+        pX[i] = hx + dx * 15; pY[i] = hy + dy * 15
+        pVx[i] = Math.cos(angle + sp) * spd; pVy[i] = Math.sin(angle + sp) * spd - Math.random()
+        pLife[i] = 1; pMaxLife[i] = 0.3 + Math.random() * 0.4
+        pSize[i] = 6 + Math.random() * 12
+        pChar[i] = fireChars[Math.random() * fireChars.length | 0]
       }
     }
   } else { fireAccum = 0 }
 
-  const bx = head.x + dx * 50, by = head.y + dy * 50
+  const bx = hx + dx * 50, by = hy + dy * 50
   fireBlastAt(bx, by, dx, dy)
   hitEnemiesWithFire(bx, by)
   triggerShake(Math.min(1 + totalFireTime * 0.2, 3))
 }
 
-function updateParticles(dt: number) {
-  for (let i = particles.length - 1; i >= 0; i--) {
-    const p = particles[i]
-    p.x += p.vx; p.y += p.vy; p.vy -= 0.25; p.vx *= 0.97; p.life -= dt / p.maxLife
-    if (p.life <= 0) { particles[i] = particles[particles.length - 1]; particles.pop() }
+function updateParticlesAndEmbers(dt: number) {
+  // Particles — swap-remove
+  for (let i = particleCount - 1; i >= 0; i--) {
+    pX[i] += pVx[i]; pY[i] += pVy[i]; pVy[i] -= 0.25; pVx[i] *= 0.97
+    pLife[i] -= dt / pMaxLife[i]
+    if (pLife[i] <= 0) {
+      particleCount--
+      pX[i] = pX[particleCount]; pY[i] = pY[particleCount]
+      pVx[i] = pVx[particleCount]; pVy[i] = pVy[particleCount]
+      pLife[i] = pLife[particleCount]; pMaxLife[i] = pMaxLife[particleCount]
+      pSize[i] = pSize[particleCount]; pChar[i] = pChar[particleCount]
+    }
   }
-  for (let i = embers.length - 1; i >= 0; i--) {
-    const e = embers[i]
-    e.x += e.vx; e.y += e.vy; e.vy += 0.15; e.vx *= 0.97; e.life -= dt
-    if (e.life <= 0) { embers[i] = embers[embers.length - 1]; embers.pop() }
+  // Embers — swap-remove
+  for (let i = emberCount - 1; i >= 0; i--) {
+    emX[i] += emVx[i]; emY[i] += emVy[i]; emVy[i] += 0.15; emVx[i] *= 0.97
+    emLife[i] -= dt
+    if (emLife[i] <= 0) {
+      emberCount--
+      emX[i] = emX[emberCount]; emY[i] = emY[emberCount]
+      emVx[i] = emVx[emberCount]; emVy[i] = emVy[emberCount]
+      emLife[i] = emLife[emberCount]; emSize[i] = emSize[emberCount]
+      emChar[i] = emChar[emberCount]; emColor[i] = emColor[emberCount]
+    }
   }
 }
 
 function drawParticles(time: number) {
   if (cfg.showEmbers) {
-    for (const e of embers) {
-      ctx.save(); ctx.globalAlpha = Math.min(1, e.life * 2)
-      ctx.font = `${e.size}px "Courier New",monospace`; ctx.fillStyle = e.color
-      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
-      ctx.fillText(e.char, e.x, e.y); ctx.restore()
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+    for (let i = 0; i < emberCount; i++) {
+      ctx.globalAlpha = Math.min(1, emLife[i] * 2)
+      ctx.font = `${emSize[i]}px "Courier New",monospace`
+      ctx.fillStyle = emColor[i]
+      ctx.fillText(emChar[i], emX[i], emY[i])
     }
   }
   if (cfg.showParticles) {
-    for (const p of particles) {
-      const t = 1 - p.life
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+    for (let i = 0; i < particleCount; i++) {
+      const t = 1 - pLife[i]
       let r: number, g: number, b: number
       if (t < 0.15) { r = 255; g = 255; b = 255 * (1 - t * 6.67) | 0 }
       else if (t < 0.4) { r = 255; g = 255 * (1 - (t - 0.15) * 3.2) | 0; b = 0 }
       else { const f = (t - 0.4) * 1.67; r = 255 * (1 - f * 0.6) | 0; g = 80 * (1 - f) | 0; b = 0 }
-      ctx.save(); ctx.globalAlpha = p.life * 0.85
-      ctx.font = `${p.size * (0.4 + p.life * 0.6)}px "Courier New",monospace`
-      ctx.fillStyle = `rgb(${r},${g},${b})`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
-      ctx.translate(p.x, p.y); ctx.rotate(Math.sin(time * 6 + p.x * 0.04) * 0.4)
-      ctx.fillText(p.char, 0, 0); ctx.restore()
+      const sz = pSize[i] * (0.4 + pLife[i] * 0.6)
+      ctx.globalAlpha = pLife[i] * 0.85
+      ctx.font = `${sz}px "Courier New",monospace`
+      ctx.fillStyle = `rgb(${r},${g},${b})`
+      ctx.fillText(pChar[i], pX[i], pY[i])
     }
   }
+  ctx.globalAlpha = 1
 }
 
-// ─── 3D Text Tunnel Background ──────────────────────────────
-// Rings of Pretext-measured multilingual text receding into a vanishing point
+// ─── 3D Text Tunnel (simplified — fewer rings) ──────────────
 
 const tunnelTexts = [
   'PRETEXT — pure text measurement',
@@ -446,343 +477,121 @@ const tunnelTexts = [
   'prepare() → layout() → render',
   'بدأت الرحلة · Начало пути · 시작',
   'No DOM. No reflow. Pure math.',
-  'Canvas · SVG · WebGL · anywhere',
   'CJK · Bidi · Emoji · Graphemes',
-  '0.0002ms per layout call',
 ]
 const tunnelFont = '13px "Courier New",monospace'
-const TUNNEL_RINGS = 18
+const TUNNEL_RINGS = 12
 const TUNNEL_DEPTH = 1200
 
-type TunnelRing = {
-  z: number              // depth (0=near, TUNNEL_DEPTH=far)
-  text: string           // the text line
-  measuredWidth: number  // pretext-measured width
-  side: number           // 0=top, 1=right, 2=bottom, 3=left
-}
-
-let tunnelRings: TunnelRing[] = []
+const tunnelZ = new Float32Array(TUNNEL_RINGS)
+const tunnelSide = new Uint8Array(TUNNEL_RINGS)
+const tunnelTextIdx = new Uint8Array(TUNNEL_RINGS)
 
 function buildTunnel() {
-  tunnelRings = []
-  // Measure all tunnel texts with Pretext
-  const widths: number[] = []
-  for (const t of tunnelTexts) {
-    try {
-      const p = prepareWithSegments(t, tunnelFont)
-      const { lines } = layoutWithLines(p, 9999, 18)
-      widths.push(lines.length > 0 ? lines[0].width : 200)
-    } catch { widths.push(200) }
-  }
-
   for (let i = 0; i < TUNNEL_RINGS; i++) {
-    const ti = i % tunnelTexts.length
-    tunnelRings.push({
-      z: (i / TUNNEL_RINGS) * TUNNEL_DEPTH,
-      text: tunnelTexts[ti],
-      measuredWidth: widths[ti],
-      side: i % 4,
-    })
+    tunnelZ[i] = (i / TUNNEL_RINGS) * TUNNEL_DEPTH
+    tunnelSide[i] = i % 4
+    tunnelTextIdx[i] = i % tunnelTexts.length
   }
 }
 buildTunnel()
 
-function drawTunnel(time: number) {
+function drawTunnel() {
   const cx = W * 0.5, cy = H * 0.5
-  const fov = 400
+  ctx.font = tunnelFont; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#ff8844'
 
-  ctx.save()
-  ctx.font = tunnelFont
-  ctx.textAlign = 'center'
-  ctx.textBaseline = 'middle'
-
-  for (const ring of tunnelRings) {
-    // Advance ring toward camera
-    ring.z -= 40 * (1 / 60) // ~40 units/sec
-    if (ring.z < 10) {
-      ring.z += TUNNEL_DEPTH
-      ring.side = (ring.side + 1) % 4
-      const ti = Math.random() * tunnelTexts.length | 0
-      ring.text = tunnelTexts[ti]
+  for (let i = 0; i < TUNNEL_RINGS; i++) {
+    tunnelZ[i] -= 0.67
+    if (tunnelZ[i] < 10) {
+      tunnelZ[i] += TUNNEL_DEPTH
+      tunnelSide[i] = (tunnelSide[i] + 1) % 4
+      tunnelTextIdx[i] = Math.random() * tunnelTexts.length | 0
     }
-
-    const scale = fov / (fov + ring.z)
+    const scale = 400 / (400 + tunnelZ[i])
     const alpha = Math.max(0, Math.min(0.06, 0.08 * scale - 0.01))
     if (alpha < 0.003) continue
-
-    // Position on the tunnel walls
     const spread = 350 * scale
-    let x: number, y: number, rotation: number
-    switch (ring.side) {
-      case 0: x = cx; y = cy - spread; rotation = 0; break       // top
-      case 1: x = cx + spread; y = cy; rotation = Math.PI / 2; break   // right
-      case 2: x = cx; y = cy + spread; rotation = 0; break       // bottom
-      case 3: x = cx - spread; y = cy; rotation = -Math.PI / 2; break  // left
-      default: x = cx; y = cy - spread; rotation = 0
-    }
-
-    const fontSize = Math.max(4, 13 * scale)
-
-    ctx.save()
-    ctx.translate(x, y)
-    ctx.rotate(rotation)
-    ctx.scale(scale, scale)
+    let x: number, y: number
+    const s = tunnelSide[i]
+    if (s === 0) { x = cx; y = cy - spread }
+    else if (s === 1) { x = cx + spread; y = cy }
+    else if (s === 2) { x = cx; y = cy + spread }
+    else { x = cx - spread; y = cy }
     ctx.globalAlpha = alpha
-    ctx.font = `${fontSize / scale}px "Courier New",monospace`
-    ctx.fillStyle = '#ff8844'
-    ctx.fillText(ring.text, 0, 0)
-    ctx.restore()
+    ctx.fillText(tunnelTexts[tunnelTextIdx[i]], x, y)
   }
-
-  // Subtle vanishing point glow
-  ctx.save()
-  ctx.globalAlpha = 0.025
-  ctx.fillStyle = '#ff6600'
-  ctx.beginPath()
-  ctx.arc(cx, cy, 60, 0, Math.PI * 2)
-  ctx.fill()
-  ctx.restore()
-
-  ctx.restore()
+  ctx.globalAlpha = 1
 }
 
-// ─── 3D Floating Text Cards ─────────────────────────────────
-// Pretext-measured text blocks rotating in pseudo-3D
-
-type FloatingCard = {
-  x: number; y: number
-  rotY: number      // Y-axis rotation (creates perspective skew)
-  rotSpeed: number
-  text: string
-  font: string
-  lines: { text: string; width: number }[]
-  lineHeight: number
-  maxWidth: number
-  phase: number
-  driftX: number; driftY: number
-}
-
-const floatingCards: FloatingCard[] = []
-const cardTexts = [
-  { text: 'prepare()', font: '18px "Courier New",monospace', maxW: 200, lh: 24 },
-  { text: 'layout()', font: '18px "Courier New",monospace', maxW: 200, lh: 24 },
-  { text: '0.0002ms', font: '22px "Courier New",monospace', maxW: 200, lh: 28 },
-  { text: '120 fps', font: '20px "Courier New",monospace', maxW: 200, lh: 26 },
-  { text: '龍 DRAGON', font: '20px "Courier New",monospace', maxW: 200, lh: 26 },
-  { text: 'npm install\n@chenglou/pretext', font: '11px "Courier New",monospace', maxW: 200, lh: 15 },
-]
-
-function buildFloatingCards() {
-  floatingCards.length = 0
-  for (let i = 0; i < cardTexts.length; i++) {
-    const ct = cardTexts[i]
-    let measuredLines: { text: string; width: number }[] = []
-    try {
-      const p = prepareWithSegments(ct.text, ct.font, { whiteSpace: 'pre-wrap' })
-      const { lines } = layoutWithLines(p, ct.maxW, ct.lh)
-      measuredLines = lines.map(l => ({ text: l.text, width: l.width }))
-    } catch {
-      measuredLines = [{ text: ct.text, width: ct.maxW }]
-    }
-
-    // Place around the edges of the screen
-    const angle = (i / cardTexts.length) * Math.PI * 2
-    const rx = W * 0.38, ry = H * 0.35
-    floatingCards.push({
-      x: W / 2 + Math.cos(angle) * rx,
-      y: H / 2 + Math.sin(angle) * ry,
-      rotY: Math.random() * Math.PI * 2,
-      rotSpeed: 0.3 + Math.random() * 0.5,
-      text: ct.text,
-      font: ct.font,
-      lines: measuredLines,
-      lineHeight: ct.lh,
-      maxWidth: ct.maxW,
-      phase: Math.random() * Math.PI * 2,
-      driftX: (Math.random() - 0.5) * 0.3,
-      driftY: (Math.random() - 0.5) * 0.2,
-    })
-  }
-}
-buildFloatingCards()
-
-function drawFloatingCards(time: number) {
-  for (const card of floatingCards) {
-    // Slow orbit drift
-    card.x += card.driftX
-    card.y += card.driftY
-    if (card.x < -100) card.x = W + 80
-    if (card.x > W + 100) card.x = -80
-    if (card.y < -100) card.y = H + 80
-    if (card.y > H + 100) card.y = -80
-
-    card.rotY += card.rotSpeed * (1 / 60)
-
-    // Faux 3D: use cos of rotation for horizontal scale (creates card flip)
-    const cosR = Math.cos(card.rotY)
-    const scaleX = cosR  // -1 to 1, creates flip effect
-    const absScale = Math.abs(cosR)
-    if (absScale < 0.1) continue // edge-on, skip
-
-    // Depth-based alpha
-    const depthAlpha = 0.03 + absScale * 0.04
-
-    ctx.save()
-    ctx.translate(card.x, card.y + Math.sin(time * 0.8 + card.phase) * 10)
-    ctx.scale(scaleX, 1)
-    ctx.globalAlpha = depthAlpha
-    ctx.font = card.font
-    ctx.fillStyle = '#ff9966'
-    ctx.textAlign = 'center'
-    ctx.textBaseline = 'top'
-
-    const totalH = card.lines.length * card.lineHeight
-    const startY = -totalH / 2
-
-    for (let li = 0; li < card.lines.length; li++) {
-      ctx.fillText(card.lines[li].text, 0, startY + li * card.lineHeight)
-    }
-
-    ctx.restore()
-  }
-}
-
-// ─── Enemies ────────────────────────────────────────────────
+// ─── Enemies (reduced to simple arrays, fewer allocations) ──
 
 type Enemy = {
-  x: number; y: number
-  vx: number; vy: number
-  hp: number; maxHp: number
-  char: string; size: number; color: string
-  phase: number
-  dying: boolean; deathTimer: number
-  kind: 'grunt' | 'tank' | 'fast' | 'ghost'
+  x: number; y: number; vx: number; vy: number
+  hp: number; maxHp: number; char: string; size: number; color: string
+  phase: number; dying: boolean; deathTimer: number; kind: number // 0=grunt,1=tank,2=fast,3=ghost
 }
 
 const enemies: Enemy[] = []
-let score = 0
-let scoreFlash = 0 // brief flash when scoring
+let score = 0, scoreFlash = 0
 
-const ENEMY_KINDS: { char: string; color: string; hp: number; size: number; speed: number; kind: Enemy['kind'] }[] = [
-  { char: '◈', color: '#ff4466', hp: 1, size: 22, speed: 1.0, kind: 'grunt' },
-  { char: '◆', color: '#ff4466', hp: 1, size: 18, speed: 1.0, kind: 'grunt' },
-  { char: '⬢', color: '#ff6688', hp: 3, size: 28, speed: 0.5, kind: 'tank' },
-  { char: '◇', color: '#44ddff', hp: 1, size: 16, speed: 2.2, kind: 'fast' },
-  { char: '⊕', color: '#44ddff', hp: 1, size: 14, speed: 2.5, kind: 'fast' },
-  { char: '◌', color: '#aa88ff', hp: 2, size: 20, speed: 0.8, kind: 'ghost' },
+const EK = [
+  { char: '◈', color: '#ff4466', hp: 1, size: 22, speed: 1.0 },
+  { char: '⬢', color: '#ff6688', hp: 3, size: 28, speed: 0.5 },
+  { char: '◇', color: '#44ddff', hp: 1, size: 16, speed: 2.2 },
+  { char: '◌', color: '#aa88ff', hp: 2, size: 20, speed: 0.8 },
 ]
 
 function spawnEnemy() {
-  const kind = ENEMY_KINDS[Math.random() * ENEMY_KINDS.length | 0]
-  // Spawn from edges
+  const k = EK[Math.random() * EK.length | 0], ki = EK.indexOf(k)
   const edge = Math.random() * 4 | 0
-  let x: number, y: number
+  let x = 0, y = 0
   if (edge === 0) { x = -30; y = Math.random() * H }
   else if (edge === 1) { x = W + 30; y = Math.random() * H }
   else if (edge === 2) { x = Math.random() * W; y = -30 }
   else { x = Math.random() * W; y = H + 30 }
-
-  enemies.push({
-    x, y,
-    vx: (Math.random() - 0.5) * kind.speed * 2,
-    vy: (Math.random() - 0.5) * kind.speed * 2,
-    hp: kind.hp, maxHp: kind.hp,
-    char: kind.char, size: kind.size, color: kind.color,
-    phase: Math.random() * Math.PI * 2,
-    dying: false, deathTimer: 0,
-    kind: kind.kind,
-  })
+  enemies.push({ x, y, vx: (Math.random() - 0.5) * k.speed * 2, vy: (Math.random() - 0.5) * k.speed * 2,
+    hp: k.hp, maxHp: k.hp, char: k.char, size: k.size, color: k.color,
+    phase: Math.random() * Math.PI * 2, dying: false, deathTimer: 0, kind: ki })
 }
 
 function updateEnemies(dt: number, time: number) {
   if (!cfg.showEnemies) return
-
-  // Maintain enemy count
-  while (enemies.filter(e => !e.dying).length < cfg.enemyCount) spawnEnemy()
+  // Count alive
+  let alive = 0
+  for (let i = 0; i < enemies.length; i++) if (!enemies[i].dying) alive++
+  while (alive < cfg.enemyCount) { spawnEnemy(); alive++ }
 
   for (let i = enemies.length - 1; i >= 0; i--) {
     const e = enemies[i]
-
     if (e.dying) {
-      e.deathTimer -= dt
-      // Explode outward
-      e.x += e.vx; e.y += e.vy
-      e.vx *= 0.95; e.vy *= 0.95
-      if (e.deathTimer <= 0) {
-        enemies[i] = enemies[enemies.length - 1]; enemies.pop()
-      }
+      e.deathTimer -= dt; e.x += e.vx; e.y += e.vy; e.vx *= 0.95; e.vy *= 0.95
+      if (e.deathTimer <= 0) { enemies[i] = enemies[enemies.length - 1]; enemies.pop() }
       continue
     }
-
-    // Movement patterns by kind
     const spd = cfg.enemySpeed
-    if (e.kind === 'ghost') {
-      // Ghosts drift in sine waves
-      e.x += Math.sin(time * 1.5 + e.phase) * spd * 1.2
-      e.y += Math.cos(time * 1.2 + e.phase * 1.3) * spd * 0.8
-    } else if (e.kind === 'fast') {
-      // Fast enemies dart around, occasionally change direction
-      e.x += e.vx * spd; e.y += e.vy * spd
-      if (Math.random() < dt * 0.5) {
-        e.vx += (Math.random() - 0.5) * 3
-        e.vy += (Math.random() - 0.5) * 3
-      }
-      e.vx *= 0.99; e.vy *= 0.99
-    } else {
-      // Grunts and tanks drift slowly, gently attracted to center
-      e.vx += (W / 2 - e.x) * 0.0001 + (Math.random() - 0.5) * 0.1
-      e.vy += (H / 2 - e.y) * 0.0001 + (Math.random() - 0.5) * 0.1
-      e.vx *= 0.995; e.vy *= 0.995
-      e.x += e.vx * spd; e.y += e.vy * spd
-    }
-
-    // Keep on screen (wrap around)
-    if (e.x < -50) e.x = W + 40
-    if (e.x > W + 50) e.x = -40
-    if (e.y < -50) e.y = H + 40
-    if (e.y > H + 50) e.y = -40
-
-    // Flee from dragon head (enemies aren't suicidal)
-    const head = chain[0]
-    const dx = e.x - head.x, dy = e.y - head.y
-    const dSq = dx * dx + dy * dy
-    if (dSq < 15000) { // within ~120px
-      const d = Math.sqrt(dSq) || 1
-      const flee = 1.5 * (1 - d / 122)
-      e.vx += (dx / d) * flee
-      e.vy += (dy / d) * flee
-    }
+    if (e.kind === 3) { e.x += Math.sin(time * 1.5 + e.phase) * spd * 1.2; e.y += Math.cos(time * 1.2 + e.phase * 1.3) * spd * 0.8 }
+    else if (e.kind === 2) { e.x += e.vx * spd; e.y += e.vy * spd; if (Math.random() < dt * 0.5) { e.vx += (Math.random() - 0.5) * 3; e.vy += (Math.random() - 0.5) * 3 }; e.vx *= 0.99; e.vy *= 0.99 }
+    else { e.vx += (W / 2 - e.x) * 0.0001 + (Math.random() - 0.5) * 0.1; e.vy += (H / 2 - e.y) * 0.0001 + (Math.random() - 0.5) * 0.1; e.vx *= 0.995; e.vy *= 0.995; e.x += e.vx * spd; e.y += e.vy * spd }
+    if (e.x < -50) e.x = W + 40; if (e.x > W + 50) e.x = -40
+    if (e.y < -50) e.y = H + 40; if (e.y > H + 50) e.y = -40
+    const dx = e.x - chX[0], dy = e.y - chY[0], dSq = dx * dx + dy * dy
+    if (dSq < 15000) { const d = Math.sqrt(dSq) || 1; const fl = 1.5 * (1 - d / 122); e.vx += (dx / d) * fl; e.vy += (dy / d) * fl }
   }
-
-  // Score flash decay
   if (scoreFlash > 0) scoreFlash -= dt * 3
 }
 
-function hitEnemiesWithFire(x: number, y: number) {
+function hitEnemiesWithFire(fx: number, fy: number) {
   if (!cfg.showEnemies) return
+  const hr = cfg.fireRadius * 0.6, hrSq = hr * hr
   for (const e of enemies) {
     if (e.dying) continue
-    const dx = e.x - x, dy = e.y - y
-    const dSq = dx * dx + dy * dy
-    const hitRadius = cfg.fireRadius * 0.6
-    if (dSq < hitRadius * hitRadius) {
-      const d = Math.sqrt(dSq) || 1
-      e.hp--
-      // Knockback
-      e.vx += (dx / d) * 5
-      e.vy += (dy / d) * 5
+    const dx = e.x - fx, dy = e.y - fy, dSq = dx * dx + dy * dy
+    if (dSq < hrSq) {
+      const d = Math.sqrt(dSq) || 1; e.hp--; e.vx += (dx / d) * 5; e.vy += (dy / d) * 5
       if (e.hp <= 0) {
-        e.dying = true
-        e.deathTimer = 0.5
-        // Burst velocity
-        e.vx = (dx / d) * 8
-        e.vy = (dy / d) * 8 - 3
-        // Score
-        const points = e.kind === 'tank' ? 30 : e.kind === 'fast' ? 20 : e.kind === 'ghost' ? 25 : 10
-        score += points
-        scoreFlash = 1
-        // Spawn embers at death
-        spawnEmbers(e.x, e.y, 5)
+        e.dying = true; e.deathTimer = 0.5; e.vx = (dx / d) * 8; e.vy = (dy / d) * 8 - 3
+        score += e.kind === 1 ? 30 : e.kind === 2 ? 20 : e.kind === 3 ? 25 : 10
+        scoreFlash = 1; for (let j = 0; j < 3; j++) spawnEmber(e.x, e.y)
       }
     }
   }
@@ -790,161 +599,112 @@ function hitEnemiesWithFire(x: number, y: number) {
 
 function drawEnemies(time: number) {
   if (!cfg.showEnemies) return
-
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
   for (const e of enemies) {
-    ctx.save()
-
     if (e.dying) {
-      // Death animation: scale down, spin, fade
       const t = e.deathTimer / 0.5
-      ctx.translate(e.x, e.y)
-      ctx.rotate(time * 15)
-      ctx.scale(t, t)
-      ctx.globalAlpha = t * 0.8
-      ctx.font = `${e.size}px "Courier New",monospace`
-      ctx.fillStyle = '#ffaa00'
-      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
-      ctx.fillText(e.char, 0, 0)
+      ctx.save(); ctx.translate(e.x, e.y); ctx.rotate(time * 15); ctx.scale(t, t)
+      ctx.globalAlpha = t * 0.8; ctx.font = `${e.size}px "Courier New",monospace`
+      ctx.fillStyle = '#ffaa00'; ctx.fillText(e.char, 0, 0); ctx.restore()
     } else {
-      // Alive: bob and pulse
       const bob = Math.sin(time * 2.5 + e.phase) * 4
-      const pulse = 1 + Math.sin(time * 4 + e.phase) * 0.08
-      const hpRatio = e.hp / e.maxHp
-
-      ctx.translate(e.x, e.y + bob)
-      ctx.scale(pulse, pulse)
-
-      // Glow when damaged
-      if (hpRatio < 1) {
-        ctx.globalAlpha = 0.15
-        ctx.fillStyle = '#ff4400'
-        ctx.beginPath(); ctx.arc(0, 0, e.size * 0.8, 0, Math.PI * 2); ctx.fill()
-      }
-
-      ctx.globalAlpha = e.kind === 'ghost' ? 0.4 + Math.sin(time * 3 + e.phase) * 0.2 : 0.75
-      ctx.font = `${e.size}px "Courier New",monospace`
-      ctx.fillStyle = e.color
-      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
-      ctx.fillText(e.char, 0, 0)
-
-      // HP pips for tanks
-      if (e.maxHp > 1 && e.hp > 0) {
-        ctx.globalAlpha = 0.5
-        ctx.font = '8px "Courier New",monospace'
-        ctx.fillStyle = '#ff6688'
-        const pips = '●'.repeat(e.hp) + '○'.repeat(e.maxHp - e.hp)
-        ctx.fillText(pips, 0, e.size * 0.7)
-      }
+      ctx.globalAlpha = e.kind === 3 ? 0.4 + Math.sin(time * 3 + e.phase) * 0.2 : 0.75
+      ctx.font = `${e.size}px "Courier New",monospace`; ctx.fillStyle = e.color
+      ctx.fillText(e.char, e.x, e.y + bob)
     }
-
-    ctx.restore()
   }
-
-  // Score display
   if (score > 0) {
-    ctx.save()
     ctx.globalAlpha = 0.3 + scoreFlash * 0.4
-    ctx.font = '600 14px Inter,system-ui,sans-serif'
-    ctx.fillStyle = scoreFlash > 0 ? '#ffaa33' : '#666'
-    ctx.textAlign = 'left'; ctx.textBaseline = 'top'
-    ctx.fillText(`SCORE ${score}`, 20, 20)
-    ctx.restore()
+    ctx.font = '600 14px Inter,system-ui,sans-serif'; ctx.fillStyle = scoreFlash > 0 ? '#ffaa33' : '#666'
+    ctx.textAlign = 'left'; ctx.textBaseline = 'top'; ctx.fillText(`SCORE ${score}`, 20, 20)
   }
+  ctx.globalAlpha = 1
 }
 
-// ─── Runes ──────────────────────────────────────────────────
+// ─── Runes (reduced count) ──────────────────────────────────
 
-type Rune = { x: number; y: number; char: string; speed: number; phase: number; size: number; opacity: number }
-const runes: Rune[] = []
-const runeChars = '龍火竜鱗焔ᚱᚦᛏᛟ◈◇⬡'.split('')
-for (let i = 0; i < 12; i++) {
-  runes.push({ x: Math.random() * W, y: Math.random() * H,
-    char: runeChars[Math.random() * runeChars.length | 0],
-    speed: 0.1 + Math.random() * 0.4, phase: Math.random() * Math.PI * 2,
-    size: 14 + Math.random() * 14, opacity: 0.02 + Math.random() * 0.04,
-  })
+const RUNE_N = 8
+const runeChars = '龍火竜鱗焔ᚱᚦᛏ'.split('')
+const runeX = new Float32Array(RUNE_N), runeY = new Float32Array(RUNE_N)
+const runeSpd = new Float32Array(RUNE_N), runePhase = new Float32Array(RUNE_N)
+const runeSz = new Float32Array(RUNE_N), runeOp = new Float32Array(RUNE_N)
+const runeC: string[] = []
+for (let i = 0; i < RUNE_N; i++) {
+  runeX[i] = Math.random() * W; runeY[i] = Math.random() * H
+  runeSpd[i] = 0.1 + Math.random() * 0.4; runePhase[i] = Math.random() * Math.PI * 2
+  runeSz[i] = 14 + Math.random() * 14; runeOp[i] = 0.02 + Math.random() * 0.04
+  runeC[i] = runeChars[Math.random() * runeChars.length | 0]
 }
+
 function drawRunes(time: number) {
   if (!cfg.showRunes) return
-  for (const r of runes) {
-    r.y -= r.speed
-    if (r.y < -30) { r.y = H + 30; r.x = Math.random() * W }
-    ctx.save()
-    ctx.globalAlpha = r.opacity * (0.5 + Math.sin(time * 0.4 + r.phase) * 0.5)
-    ctx.font = `${r.size}px "Courier New",monospace`; ctx.fillStyle = '#ff6600'
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
-    ctx.fillText(r.char, r.x + Math.sin(time * 0.7 + r.phase) * 12, r.y)
-    ctx.restore()
+  ctx.fillStyle = '#ff6600'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+  for (let i = 0; i < RUNE_N; i++) {
+    runeY[i] -= runeSpd[i]
+    if (runeY[i] < -30) { runeY[i] = H + 30; runeX[i] = Math.random() * W }
+    ctx.globalAlpha = runeOp[i] * (0.5 + Math.sin(time * 0.4 + runePhase[i]) * 0.5)
+    ctx.font = `${runeSz[i]}px "Courier New",monospace`
+    ctx.fillText(runeC[i], runeX[i] + Math.sin(time * 0.7 + runePhase[i]) * 12, runeY[i])
   }
+  ctx.globalAlpha = 1
 }
 
 // ─── Draw dragon ────────────────────────────────────────────
 
 function drawDragon(time: number) {
-  const n = chain.length
-  for (let i = n - 1; i >= 0; i--) {
-    const seg = chain[i], sc = segScale(i), color = segColor(i, time)
-    const ci = Math.min(i, dragonChars.length - 1), size = 14 * sc
+  for (let i = chainN - 1; i >= 0; i--) {
+    const sc = segScale(i), ci = Math.min(i, dragonChars.length - 1), size = 14 * sc
+    const t = i / chainN, p = Math.sin(time * 3 + i * 0.3) * 0.12
+    let color: string
+    if (i < 3) color = `rgb(255,${180 + p * 60 | 0},${40 + p * 30 | 0})`
+    else {
+      const w = Math.sin(time * 2 - i * 0.15) * 0.15
+      color = `rgba(${(255 * (1 - t * 0.5) + p * 20) | 0},${(140 * (1 - t * 0.8) + w * 60) | 0},${(30 * (1 - t) + w * 20) | 0},${1 - t * 0.45})`
+    }
     let angle = i === 0
-      ? Math.atan2(mouse.y - seg.y, mouse.x - seg.x)
-      : Math.atan2(chain[i - 1].y - seg.y, chain[i - 1].x - seg.x)
+      ? Math.atan2(mouse.y - chY[0], mouse.x - chX[0])
+      : Math.atan2(chY[i - 1] - chY[i], chX[i - 1] - chX[i])
 
-    // Head glow
     if (i < 4) {
-      ctx.save(); ctx.globalAlpha = 0.06 * (isBreathingFire ? 2 : 1)
+      ctx.globalAlpha = 0.06 * (isBreathingFire ? 2 : 1)
       ctx.fillStyle = '#ff6600'; ctx.beginPath()
-      ctx.arc(seg.x, seg.y, size * 1.1, 0, Math.PI * 2); ctx.fill(); ctx.restore()
+      ctx.arc(chX[i], chY[i], size * 1.1, 0, Math.PI * 2); ctx.fill()
     }
 
-    // Spines
     if (cfg.showSpines && i >= 4 && i <= 30 && i % 3 === 0) {
       const sa = angle + Math.PI / 2
-      ctx.save(); ctx.globalAlpha = 0.35
+      ctx.globalAlpha = 0.35
       ctx.font = `${size * (0.6 + Math.sin(time * 3 + i) * 0.15)}px "Courier New",monospace`
       ctx.fillStyle = color; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
-      ctx.fillText('▴', seg.x + Math.cos(sa) * size * 0.35, seg.y + Math.sin(sa) * size * 0.35)
-      ctx.restore()
+      ctx.fillText('▴', chX[i] + Math.cos(sa) * size * 0.35, chY[i] + Math.sin(sa) * size * 0.35)
     }
 
-    // Wings
     if (cfg.showWings && i >= 7 && i <= 16 && i % 2 === 0) {
       const wp = Math.sin(time * 3.5 + i * 0.4) * 0.5
       const ws = size * (1.8 - Math.abs(i - 11.5) * 0.12), wd = size * 1.4
       const w1 = angle + Math.PI / 2 + wp, w2 = angle - Math.PI / 2 - wp
-      ctx.save(); ctx.globalAlpha = 0.4
-      ctx.font = `${ws}px "Courier New",monospace`; ctx.fillStyle = color
-      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
-      ctx.fillText('≺', seg.x + Math.cos(w1) * wd, seg.y + Math.sin(w1) * wd)
-      ctx.fillText('≻', seg.x + Math.cos(w2) * wd, seg.y + Math.sin(w2) * wd)
-      if (i >= 9 && i <= 14) {
-        ctx.font = `${ws * 0.7}px "Courier New",monospace`; ctx.globalAlpha = 0.2
-        ctx.fillText('‹', seg.x + Math.cos(w1) * wd * 1.7, seg.y + Math.sin(w1) * wd * 1.7)
-        ctx.fillText('›', seg.x + Math.cos(w2) * wd * 1.7, seg.y + Math.sin(w2) * wd * 1.7)
-      }
-      ctx.restore()
+      ctx.globalAlpha = 0.4; ctx.font = `${ws}px "Courier New",monospace`
+      ctx.fillStyle = color; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+      ctx.fillText('≺', chX[i] + Math.cos(w1) * wd, chY[i] + Math.sin(w1) * wd)
+      ctx.fillText('≻', chX[i] + Math.cos(w2) * wd, chY[i] + Math.sin(w2) * wd)
     }
 
-    // Body
-    ctx.save(); ctx.translate(seg.x, seg.y); ctx.rotate(angle)
-    ctx.font = `bold ${size}px "Courier New",monospace`; ctx.fillStyle = color
+    ctx.save(); ctx.translate(chX[i], chY[i]); ctx.rotate(angle)
+    ctx.globalAlpha = 1; ctx.font = `bold ${size}px "Courier New",monospace`; ctx.fillStyle = color
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
-    const wb = Math.sin(time * 5 + i * 0.35) * 1.5
-    ctx.fillText(dragonChars[ci], 0, wb)
-    if (isBreathingFire && i < 3) { ctx.globalAlpha = 0.3; ctx.fillStyle = '#ffcc00'; ctx.fillText(dragonChars[ci], 0, wb) }
+    ctx.fillText(dragonChars[ci], 0, Math.sin(time * 5 + i * 0.35) * 1.5)
+    if (isBreathingFire && i < 3) { ctx.globalAlpha = 0.3; ctx.fillStyle = '#ffcc00'; ctx.fillText(dragonChars[ci], 0, Math.sin(time * 5 + i * 0.35) * 1.5) }
     ctx.restore()
   }
 
   // Eyes
-  const head = chain[0], ha = Math.atan2(mouse.y - head.y, mouse.x - head.x)
-  const ex = head.x + Math.cos(ha + 0.5) * 10, ey = head.y + Math.sin(ha + 0.5) * 10
-  ctx.save(); ctx.globalAlpha = isBreathingFire ? 0.2 : 0.1; ctx.fillStyle = '#ff8800'
-  ctx.beginPath(); ctx.arc(ex, ey, isBreathingFire ? 18 : 12, 0, Math.PI * 2); ctx.fill(); ctx.restore()
-  ctx.fillStyle = isBreathingFire ? '#fff' : '#ffcc00'
+  const ha = Math.atan2(mouse.y - chY[0], mouse.x - chX[0])
+  const ex = chX[0] + Math.cos(ha + 0.5) * 10, ey = chY[0] + Math.sin(ha + 0.5) * 10
+  ctx.globalAlpha = isBreathingFire ? 0.2 : 0.1; ctx.fillStyle = '#ff8800'
+  ctx.beginPath(); ctx.arc(ex, ey, isBreathingFire ? 18 : 12, 0, Math.PI * 2); ctx.fill()
+  ctx.globalAlpha = 1; ctx.fillStyle = isBreathingFire ? '#fff' : '#ffcc00'
   ctx.font = '16px "Courier New"'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
   ctx.fillText(time % 5 > 4.7 ? '—' : isBreathingFire ? '◉' : '⊙', ex, ey)
-  const ex2 = head.x + Math.cos(ha - 0.5) * 10, ey2 = head.y + Math.sin(ha - 0.5) * 10
-  ctx.fillStyle = isBreathingFire ? '#ffee88' : '#ffbb33'; ctx.font = '12px "Courier New"'
-  ctx.fillText(time % 5 > 4.7 ? '—' : '·', ex2, ey2)
 }
 
 // ─── Cursor ─────────────────────────────────────────────────
@@ -952,32 +712,19 @@ function drawDragon(time: number) {
 function drawCursor(time: number) {
   if (!cfg.showCursor) return
   const mx = mouse.x, my = mouse.y
-
-  // Outer ring — slow rotation
   ctx.save()
   ctx.translate(mx, my); ctx.rotate(time * 0.4)
   ctx.globalAlpha = 0.25; ctx.strokeStyle = '#ff8844'; ctx.lineWidth = 1
   ctx.beginPath(); ctx.arc(0, 0, 16, 0, Math.PI * 0.5); ctx.stroke()
   ctx.beginPath(); ctx.arc(0, 0, 16, Math.PI, Math.PI * 1.5); ctx.stroke()
   ctx.restore()
-
-  // Inner dot
-  ctx.save()
-  ctx.globalAlpha = isBreathingFire ? 0.8 : 0.5
-  ctx.fillStyle = isBreathingFire ? '#ffaa33' : '#ff8844'
+  ctx.globalAlpha = isBreathingFire ? 0.8 : 0.5; ctx.fillStyle = isBreathingFire ? '#ffaa33' : '#ff8844'
   ctx.beginPath(); ctx.arc(mx, my, isBreathingFire ? 3 : 2, 0, Math.PI * 2); ctx.fill()
-  ctx.restore()
-
-  // Crosshair lines
-  ctx.save()
   ctx.globalAlpha = 0.15; ctx.strokeStyle = '#ff8844'; ctx.lineWidth = 0.5
   ctx.beginPath()
-  ctx.moveTo(mx - 24, my); ctx.lineTo(mx - 8, my)
-  ctx.moveTo(mx + 8, my); ctx.lineTo(mx + 24, my)
-  ctx.moveTo(mx, my - 24); ctx.lineTo(mx, my - 8)
-  ctx.moveTo(mx, my + 8); ctx.lineTo(mx, my + 24)
-  ctx.stroke()
-  ctx.restore()
+  ctx.moveTo(mx - 24, my); ctx.lineTo(mx - 8, my); ctx.moveTo(mx + 8, my); ctx.lineTo(mx + 24, my)
+  ctx.moveTo(mx, my - 24); ctx.lineTo(mx, my - 8); ctx.moveTo(mx, my + 8); ctx.lineTo(mx, my + 24)
+  ctx.stroke(); ctx.globalAlpha = 1
 }
 
 // ─── UI Panel binding ───────────────────────────────────────
@@ -990,28 +737,21 @@ const statsEl = document.getElementById('stats')!
 
 let panelOpen = false
 function setPanelOpen(open: boolean) {
-  panelOpen = open
-  panel.classList.toggle('open', open)
+  panelOpen = open; panel.classList.toggle('open', open)
   toggle.style.display = open ? 'none' : 'flex'
-  document.body.style.cursor = open ? 'default' : 'none'
 }
-
 toggle.addEventListener('click', (e) => { e.stopPropagation(); setPanelOpen(true) })
 closeBtn.addEventListener('click', (e) => { e.stopPropagation(); setPanelOpen(false) })
 addEventListener('keydown', (e) => {
-  if (e.key === 'p' || e.key === 'P') { if (!(e.target as HTMLElement).closest('input,textarea')) setPanelOpen(!panelOpen) }
+  if ((e.key === 'p' || e.key === 'P') && !(e.target as HTMLElement).closest('input,textarea')) setPanelOpen(!panelOpen)
   if (e.key === 'Escape' && panelOpen) setPanelOpen(false)
 })
-
-// Prevent fire when interacting with panel
 panel.addEventListener('mousedown', (e) => e.stopPropagation())
 panel.addEventListener('touchstart', (e) => e.stopPropagation())
 
-// Build preset buttons
 for (const name of Object.keys(PRESETS)) {
   const btn = document.createElement('button')
-  btn.className = 'preset-btn'
-  btn.textContent = name
+  btn.className = 'preset-btn'; btn.textContent = name
   btn.addEventListener('click', () => {
     applyPreset(name)
     presetsEl.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'))
@@ -1020,83 +760,51 @@ for (const name of Object.keys(PRESETS)) {
   presetsEl.appendChild(btn)
 }
 
-// Bind range inputs
 function syncUI() {
   panel.querySelectorAll<HTMLInputElement>('input[data-key]').forEach(input => {
     const key = input.dataset.key as keyof typeof cfg
-    if (input.type === 'checkbox') {
-      input.checked = cfg[key] as boolean
-    } else {
-      input.value = String(cfg[key])
-    }
-    const valEl = panel.querySelector(`[data-val="${key}"]`)
-    if (valEl) valEl.textContent = String(cfg[key])
+    if (input.type === 'checkbox') input.checked = cfg[key] as boolean
+    else input.value = String(cfg[key])
+    const v = panel.querySelector(`[data-val="${key}"]`)
+    if (v) v.textContent = String(cfg[key])
   })
 }
 
 panel.querySelectorAll<HTMLInputElement>('input[data-key]').forEach(input => {
   const key = input.dataset.key as keyof typeof cfg
-
   const handler = () => {
-    if (input.type === 'checkbox') {
-      (cfg as any)[key] = input.checked
-    } else {
-      (cfg as any)[key] = parseFloat(input.value)
-    }
-    const valEl = panel.querySelector(`[data-val="${key}"]`)
-    if (valEl) valEl.textContent = input.type === 'checkbox' ? String(input.checked) : parseFloat(input.value).toFixed(input.step?.includes('.') ? 3 : 0)
-
-    // Rebuild dragon if segment count changed
+    (cfg as any)[key] = input.type === 'checkbox' ? input.checked : parseFloat(input.value)
+    const v = panel.querySelector(`[data-val="${key}"]`)
+    if (v) v.textContent = input.type === 'checkbox' ? String(input.checked) : parseFloat(input.value).toFixed(input.step?.includes('.') ? 3 : 0)
     if (key === 'dragonSegments') rebuildDragon()
-
-    // Clear active preset
     presetsEl.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'))
   }
-
-  input.addEventListener('input', handler)
-  input.addEventListener('change', handler)
+  input.addEventListener('input', handler); input.addEventListener('change', handler)
 })
-
 syncUI()
 
 // ─── Main loop ──────────────────────────────────────────────
 
 let lastTime = performance.now(), time = 0, frameCount = 0, fpsTime = 0, fps = 0
 
-initialized = true
-layoutAllText()
+initialized = true; layoutAllText()
 document.fonts.ready.then(layoutAllText)
 
 function frame(now: number) {
   const dt = Math.min((now - lastTime) / 1000, 0.05)
   lastTime = now; time += dt
-
-  // FPS counter
   frameCount++; fpsTime += dt
   if (fpsTime >= 0.5) { fps = Math.round(frameCount / fpsTime); frameCount = 0; fpsTime = 0 }
-  statsEl.textContent = `${fps} fps · ${letters.length} letters · ${particles.length + embers.length} particles`
+  statsEl.textContent = `${fps} fps · ${letterCount} letters · ${particleCount + emberCount} particles`
 
   updateShake()
   ctx.save(); ctx.translate(shakeX, shakeY)
-  ctx.fillStyle = '#0a0a0a'
-  ctx.fillRect(-10, -10, W + 20, H + 20)
-  drawTunnel(time)
-
+  ctx.fillStyle = '#0a0a0a'; ctx.fillRect(-10, -10, W + 20, H + 20)
+  drawTunnel()
   drawRunes(time)
-  drawFloatingCards(time)
-  updateChain()
-  interactLetters(dt)
-  emitFire(dt)
-  updateParticles(dt)
-
+  updateChain(); interactLetters(dt); emitFire(dt); updateParticlesAndEmbers(dt)
   updateEnemies(dt, time)
-
-  drawLetters()
-  drawEnemies(time)
-  drawDragon(time)
-  drawParticles(time)
-  drawCursor(time)
-
+  drawLetters(); drawEnemies(time); drawDragon(time); drawParticles(time); drawCursor(time)
   ctx.restore()
 
   const hint = document.getElementById('hint')
@@ -1104,5 +812,4 @@ function frame(now: number) {
 
   requestAnimationFrame(frame)
 }
-
 requestAnimationFrame(frame)
